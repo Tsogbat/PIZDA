@@ -14,6 +14,7 @@ Place the following optional models here:
   - The app estimates speech emotion from prosody (pitch/energy/rate) by default.
   - If you have Ollama installed locally, it can optionally refine speech emotion using your local model (default: `qwen3:8b`).
   - Configure in `src/interview_coach/config.py` (`OllamaConfig`).
+  - Quick check: `python3 -m interview_coach.diagnose`
 
 - `models/vosk/`
   - A Vosk language model folder (e.g., `vosk-model-small-en-us-0.15/` unpacked here).

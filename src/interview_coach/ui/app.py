@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         self._session_active = False
         self._session_started_wall_s: float | None = None
         self._last_device_hint_s = 0.0
+        self._last_ollama_hint_s = 0.0
         self._recorded_question_ids: set[str] = set()
         self._active_question_id = "waiting"
         self._active_question_index = -1
@@ -286,7 +287,8 @@ class MainWindow(QMainWindow):
                 pause_txt = f"{a.pause_count} (last {a.last_pause_s:.1f}s)"
             self._kpi_pauses.findChild(QLabel, "KpiValue").setText(pause_txt)
             emo_conf = max(a.speech_emotion_scores.values()) if a.speech_emotion_scores else 0.0
-            self._kpi_speech_emotion.findChild(QLabel, "KpiValue").setText(f"{a.speech_emotion} ({emo_conf:.2f})")
+            emo_src = "LLM" if getattr(a, "speech_emotion_source", "heuristic") == "ollama" else "heur"
+            self._kpi_speech_emotion.findChild(QLabel, "KpiValue").setText(f"{a.speech_emotion} ({emo_conf:.2f}, {emo_src})")
 
             full = a.transcript_text
             if full != self._transcript_last:
@@ -305,6 +307,7 @@ class MainWindow(QMainWindow):
 
         self._update_status(v, a, fr)
         self._maybe_device_hints(v, a)
+        self._maybe_ollama_hints()
 
     def _set_question(self, q, transcript_text: str) -> None:
         if q.id == "done":
@@ -313,7 +316,13 @@ class MainWindow(QMainWindow):
             return
 
         idx = max(0, int(self._interviewer.index))
-        self._question.setText(f"Q{idx + 1}/{self._interviewer.total}: {q.text}")
+        src = getattr(q, "source", "")
+        suffix = ""
+        if src == "llm":
+            suffix = "  (LLM)"
+        elif src == "predefined" and bool(getattr(self._cfg.interview, "use_llm_questions", False)):
+            suffix = "  (fallback)"
+        self._question.setText(f"Q{idx + 1}/{self._interviewer.total}: {q.text}{suffix}")
         self._btn_next.setEnabled(bool(q.ready) and (not self._interviewer.finished))
 
         if not q.ready:
@@ -344,8 +353,21 @@ class MainWindow(QMainWindow):
         else:
             stt = "ok" if a.transcript_text or a.partial_text else "listening"
             parts.append(f"Mic: ok ({stt}, {a.latency_ms:.0f}ms)")
+        parts.append(self._ollama_status_text())
         parts.append(f"Fusion: {fr.latency_ms:.0f}ms")
         self._status.setText(" | ".join(parts))
+
+    def _ollama_status_text(self) -> str:
+        q = self._interviewer.ollama_status()
+        e = self._audio.ollama_status()
+        enabled = bool(q.get("enabled")) or bool(e.get("enabled"))
+        if not enabled:
+            return "Ollama: off"
+        now = time.time()
+        last_ok = max(float(q.get("last_ok_s") or 0.0), float(e.get("last_ok_s") or 0.0))
+        if last_ok > 0.0 and (now - last_ok) < 90.0:
+            return "Ollama: ok"
+        return "Ollama: offline"
 
     def _maybe_device_hints(self, v, a) -> None:
         if not self._session_active:
@@ -368,6 +390,35 @@ class MainWindow(QMainWindow):
             self._last_device_hint_s = now
             self._maybe_toast("Microphone not available. Check permissions and input device.")
             return
+
+    def _maybe_ollama_hints(self) -> None:
+        if not self._session_active:
+            return
+        if self._session_started_wall_s is None:
+            return
+        now = time.time()
+        if (now - self._session_started_wall_s) < 2.0:
+            return
+        if (now - self._last_ollama_hint_s) < 10.0:
+            return
+
+        q = self._interviewer.ollama_status()
+        e = self._audio.ollama_status()
+        enabled = bool(q.get("enabled")) or bool(e.get("enabled"))
+        if not enabled:
+            return
+
+        last_ok = max(float(q.get("last_ok_s") or 0.0), float(e.get("last_ok_s") or 0.0))
+        if last_ok > 0.0 and (now - last_ok) < 90.0:
+            return
+
+        err = q.get("last_error") or e.get("last_error")
+        if err:
+            msg = f"Ollama issue: {err}"
+        else:
+            msg = "Ollama not responding. Start `ollama serve` and verify host/model in config."
+        self._last_ollama_hint_s = now
+        self._maybe_toast(msg)
 
     def _maybe_record_sample(self, v, a, fr) -> None:
         if not self._session.active:

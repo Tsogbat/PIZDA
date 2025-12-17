@@ -4,8 +4,10 @@ src/interview_coach/__init__.py
 src/interview_coach/__main__.py
 src/interview_coach/analytics.py
 src/interview_coach/config.py
+src/interview_coach/diagnose.py
 src/interview_coach/fusion.py
 src/interview_coach/interviewer.py
+src/interview_coach/ollama.py
 src/interview_coach/session.py
 src/interview_coach/tts.py
 src/interview_coach/audio/__init__.py

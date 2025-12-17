@@ -34,6 +34,7 @@ class AudioResult:
     energy_var: float
     speech_emotion: str
     speech_emotion_scores: dict[str, float]
+    speech_emotion_source: str
     latency_ms: float
 
 
@@ -79,6 +80,7 @@ class AudioWorker:
         self._audio_buffer_len = 0
         self._last_window_s = 0.0
         self._last_emotion: tuple[str, dict[str, float]] = ("neutral", {"neutral": 1.0})
+        self._last_emotion_source = "heuristic"
         self._last_pitch: float | None = None
         self._hold_until_s = 0.0
 
@@ -159,6 +161,7 @@ class AudioWorker:
         self._audio_buffer_len = 0
         self._last_window_s = 0.0
         self._last_emotion = ("neutral", {"neutral": 1.0})
+        self._last_emotion_source = "heuristic"
         self._last_pitch = None
         self._hold_until_s = 0.0
         self._ollama.reset()
@@ -175,6 +178,9 @@ class AudioWorker:
     def latest(self) -> AudioResult | None:
         with self._lock:
             return self._latest
+
+    def ollama_status(self) -> dict:
+        return self._ollama.status()
 
     def hold(self, seconds: float) -> None:
         seconds = float(seconds)
@@ -206,6 +212,7 @@ class AudioWorker:
                 energy_var=prev.energy_var,
                 speech_emotion=prev.speech_emotion,
                 speech_emotion_scores=prev.speech_emotion_scores,
+                speech_emotion_source=prev.speech_emotion_source,
                 latency_ms=0.0,
             )
 
@@ -288,6 +295,7 @@ class AudioWorker:
             energy_var=energy_var,
             speech_emotion=label,
             speech_emotion_scores=scores,
+            speech_emotion_source=self._last_emotion_source,
             latency_ms=(time.perf_counter() - t0) * 1000.0,
         )
         with self._lock:
@@ -381,6 +389,7 @@ class AudioWorker:
                 energy_var=energy_var,
                 speech_emotion=label,
                 speech_emotion_scores=scores,
+                speech_emotion_source=self._last_emotion_source,
                 latency_ms=0.0,
             )
 
@@ -485,10 +494,16 @@ class AudioWorker:
         )
 
         heur = heuristic_speech_emotion(x)
+        if not speaking:
+            self._last_emotion = heur
+            self._last_emotion_source = "heuristic"
+            return
+
         self._ollama.submit(x)
         pred = self._ollama.latest(max_age_s=10.0)
         if pred is None:
             self._last_emotion = heur
+            self._last_emotion_source = "heuristic"
             return
 
         heur_label, heur_scores = heur
@@ -500,7 +515,12 @@ class AudioWorker:
         else:
             use_pred = bool(pred.confidence >= 0.88 and (heur_label == "neutral" or pred.confidence >= (heur_conf + 0.08)))
 
-        self._last_emotion = (pred.label, pred.scores) if use_pred else heur
+        if use_pred:
+            self._last_emotion = (pred.label, pred.scores)
+            self._last_emotion_source = "ollama"
+        else:
+            self._last_emotion = heur
+            self._last_emotion_source = "heuristic"
 
 
 def _to_pcm16_bytes(chunk_f32: np.ndarray) -> bytes:

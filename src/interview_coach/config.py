@@ -60,6 +60,45 @@ class AudioConfig:
         "alright",
         "okay",
         "ok",
+        "ah",
+        "mhm",
+        "nah",
+        "anyway",
+        "just",
+        "totally",
+        "honestly",
+        "personally",
+        "clearly",
+        "evidently",
+        "you see",
+        "i guess",
+        "i suppose",
+        "or something",
+        "i think",
+        "i feel",
+        "in a way",
+        "you know what i mean",
+        "at the end of the day",
+        "to be honest",
+        "needless to say",
+        "for what it's worth",
+        "truthfully",
+        "exactly",
+        "certainly",
+        "i'm guessing",
+        "let me see",
+        "let's see",
+        "let me think",
+        "gosh",
+        "jeez",
+        "wow",
+        "right",
+        "yeah",
+        "no",
+        "em",
+        "erm",
+        "uhu",
+        "eh",
     )
 
 
@@ -69,6 +108,9 @@ class OllamaConfig:
     host: str = "http://localhost:11434"
     model: str = "qwen3:8b"
     timeout_s: float = 2.0
+    # Separate timeouts so question generation can be slower without breaking real-time UX.
+    question_timeout_s: float = 30.0
+    speech_timeout_s: float = 6.0
     min_interval_s: float = 3.0
 
 
@@ -76,7 +118,7 @@ class OllamaConfig:
 class InterviewConfig:
     use_llm_questions: bool = True
     num_questions: int = 8
-    target_role: str = ""
+    target_role: str = "Data analyst"
 
 
 @dataclass(frozen=True)

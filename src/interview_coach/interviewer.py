@@ -5,11 +5,12 @@ import queue
 import re
 import threading
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 
 from interview_coach.config import InterviewConfig, OllamaConfig
+from interview_coach.ollama import extract_text as _ollama_extract_text
+from interview_coach.ollama import looks_like_format_error as _ollama_looks_like_format_error
+from interview_coach.ollama import post_json as _ollama_post_json
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,9 @@ class OllamaInterviewQuestionClient:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._latest: _QuestionResponse | None = None
+        self._last_ok_s = 0.0
+        self._last_error: str | None = None
+        self._last_error_s = 0.0
 
         if self._cfg.enabled:
             self._thread = threading.Thread(target=self._run, name="OllamaInterviewQuestions", daemon=True)
@@ -86,6 +90,15 @@ class OllamaInterviewQuestionClient:
             self._latest = None
         return out
 
+    def status(self) -> dict:
+        with self._lock:
+            return {
+                "enabled": bool(self._cfg.enabled),
+                "last_ok_s": float(self._last_ok_s),
+                "last_error": self._last_error,
+                "last_error_s": float(self._last_error_s),
+            }
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
@@ -95,44 +108,75 @@ class OllamaInterviewQuestionClient:
             resp = self._infer(req)
             with self._lock:
                 self._latest = resp
+                if resp.text:
+                    self._last_ok_s = float(resp.updated_s)
+                    self._last_error = None
+                elif resp.error:
+                    self._last_error = str(resp.error)
+                    self._last_error_s = float(resp.updated_s)
 
     def _infer(self, req: _QuestionRequest) -> _QuestionResponse:
         prompt = _ollama_question_prompt(req)
-        payload = {
-            "model": self._cfg.model,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-            "options": {"temperature": 0.3, "num_predict": 120},
-        }
-        url = self._cfg.host.rstrip("/") + "/api/generate"
-        http_req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        timeout_s = float(getattr(self._cfg, "question_timeout_s", self._cfg.timeout_s))
+        t2 = float(min(max(timeout_s * 2.0, timeout_s + 4.0), 90.0))
+        timeouts = tuple(dict.fromkeys([timeout_s, t2]))
+
+        payloads: tuple[tuple[str, dict], ...] = (
+            (
+                "/api/chat",
+                {
+                    "model": self._cfg.model,
+                    "messages": [
+                        {"role": "system", "content": "You are a mock interview AI interviewer."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0.3, "num_predict": 80},
+                },
+            ),
+            (
+                "/api/generate",
+                {
+                    "model": self._cfg.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0.3, "num_predict": 80},
+                },
+            ),
         )
-        try:
-            with urllib.request.urlopen(http_req, timeout=self._cfg.timeout_s) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
-        except (urllib.error.URLError, TimeoutError) as e:
-            return _QuestionResponse(updated_s=time.time(), index=req.index, text=None, error=str(e))
 
-        try:
-            outer = json.loads(body)
-        except json.JSONDecodeError as e:
-            return _QuestionResponse(updated_s=time.time(), index=req.index, text=None, error=f"invalid JSON: {e}")
+        last_err: str | None = None
+        for attempt, t in enumerate(timeouts):
+            for path, payload in payloads:
+                outer, err = _ollama_post_json(self._cfg.host, path, payload, t)
+                if err and _ollama_looks_like_format_error(err):
+                    payload2 = dict(payload)
+                    payload2.pop("format", None)
+                    outer, err = _ollama_post_json(self._cfg.host, path, payload2, t)
+                if err:
+                    last_err = err
+                    continue
+                if outer is None:
+                    last_err = last_err or "request failed"
+                    continue
 
-        raw = str(outer.get("response") or "").strip()
-        data = _parse_json_object(raw) or {}
-        text = str(data.get("question") or "").strip()
-        if not text:
-            text = raw.splitlines()[0].strip() if raw else ""
+                raw = _ollama_extract_text(outer).strip()
+                data = _parse_json_object(raw) or {}
+                text = str(data.get("question") or "").strip()
+                if not text:
+                    text = raw.splitlines()[0].strip() if raw else ""
 
-        text = _sanitize_question(text)
-        if not text:
-            return _QuestionResponse(updated_s=time.time(), index=req.index, text=None, error="empty question")
-        return _QuestionResponse(updated_s=time.time(), index=req.index, text=text, error=None)
+                text = _sanitize_question(text)
+                if text:
+                    return _QuestionResponse(updated_s=time.time(), index=req.index, text=text, error=None)
+                last_err = "empty question"
+
+            if attempt == 0:
+                time.sleep(0.2)
+
+        return _QuestionResponse(updated_s=time.time(), index=req.index, text=None, error=last_err or "request failed")
 
 
 def _ollama_question_prompt(req: _QuestionRequest) -> str:
@@ -149,6 +193,7 @@ def _ollama_question_prompt(req: _QuestionRequest) -> str:
         f"- {role_line}\n"
         "- Do NOT repeat or paraphrase previous questions.\n"
         "- Keep it concise (<= 22 words).\n"
+        "- If a target role is provided, tailor the question to that role's typical responsibilities.\n"
         "- Prefer behavioral or role-relevant questions; mix topics (strengths/weaknesses/conflict/leadership/failure/impact/why this role).\n"
         "\n"
         "Previous questions:\n"
@@ -207,6 +252,11 @@ class Interviewer:
         if self._client is not None:
             self._client.stop()
         self._client = None
+
+    def ollama_status(self) -> dict:
+        if self._client is None:
+            return {"enabled": False, "last_ok_s": 0.0, "last_error": None, "last_error_s": 0.0}
+        return self._client.status()
 
     def poll(self) -> InterviewQuestion | None:
         if self._client is None:

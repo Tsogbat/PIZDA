@@ -5,11 +5,12 @@ import queue
 import re
 import threading
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 
 from interview_coach.config import OllamaConfig
+from interview_coach.ollama import extract_text as _ollama_extract_text
+from interview_coach.ollama import looks_like_format_error as _ollama_looks_like_format_error
+from interview_coach.ollama import post_json as _ollama_post_json
 from interview_coach.utils.smoothing import clamp
 
 
@@ -99,6 +100,9 @@ class OllamaSpeechEmotionClient:
         self._latest: OllamaPrediction | None = None
         self._next_allowed_s = 0.0
         self._last_submit_s = 0.0
+        self._last_ok_s = 0.0
+        self._last_error: str | None = None
+        self._last_error_s = 0.0
 
         if self._cfg.enabled:
             self._thread = threading.Thread(target=self._run, name="OllamaSpeechEmotion", daemon=True)
@@ -144,6 +148,15 @@ class OllamaSpeechEmotionClient:
             return None
         return pred
 
+    def status(self) -> dict:
+        with self._lock:
+            return {
+                "enabled": bool(self._cfg.enabled),
+                "last_ok_s": float(self._last_ok_s),
+                "last_error": self._last_error,
+                "last_error_s": float(self._last_error_s),
+            }
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
@@ -155,49 +168,74 @@ class OllamaSpeechEmotionClient:
                 if pred is not None:
                     with self._lock:
                         self._latest = pred
+                        self._last_ok_s = float(pred.updated_s)
+                        self._last_error = None
             except Exception:
+                with self._lock:
+                    self._last_error = "speech emotion request failed"
+                    self._last_error_s = time.time()
                 self._next_allowed_s = time.time() + 10.0
 
     def _infer(self, x: SpeechEmotionInput) -> OllamaPrediction | None:
         if not x.speaking:
-            return OllamaPrediction(updated_s=time.time(), label="neutral", confidence=1.0, scores=_one_hot("neutral", 1.0))
+            return None
 
         prompt = _ollama_prompt(x)
-        payload = {
-            "model": self._cfg.model,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-            "options": {"temperature": 0.0, "num_predict": 80},
-        }
-        url = self._cfg.host.rstrip("/") + "/api/generate"
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        timeout_s = float(getattr(self._cfg, "speech_timeout_s", self._cfg.timeout_s))
+        payloads: tuple[tuple[str, dict], ...] = (
+            (
+                "/api/chat",
+                {
+                    "model": self._cfg.model,
+                    "messages": [
+                        {"role": "system", "content": "You are an interview coach. Classify vocal emotion."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0.0, "num_predict": 64},
+                },
+            ),
+            (
+                "/api/generate",
+                {
+                    "model": self._cfg.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0.0, "num_predict": 64},
+                },
+            ),
         )
-        try:
-            with urllib.request.urlopen(req, timeout=self._cfg.timeout_s) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
-        except (urllib.error.URLError, TimeoutError):
-            self._next_allowed_s = time.time() + 10.0
-            return None
 
-        try:
-            outer = json.loads(body)
-        except json.JSONDecodeError:
-            self._next_allowed_s = time.time() + 10.0
-            return None
+        last_err: str | None = None
+        for path, payload in payloads:
+            outer, err = _ollama_post_json(self._cfg.host, path, payload, timeout_s)
+            if err and _ollama_looks_like_format_error(err):
+                payload2 = dict(payload)
+                payload2.pop("format", None)
+                outer, err = _ollama_post_json(self._cfg.host, path, payload2, timeout_s)
+            if err:
+                last_err = err
+                continue
+            if outer is None:
+                last_err = last_err or "Ollama unreachable"
+                continue
 
-        text = str(outer.get("response") or "").strip()
-        data = _parse_json_object(text) or {}
-        label = str(data.get("label") or "neutral").strip().lower()
-        label = _normalize_label(label)
-        conf = float(data.get("confidence") or 0.6)
-        conf = float(clamp(conf, 0.0, 1.0))
-        scores = _one_hot(label, conf)
-        return OllamaPrediction(updated_s=time.time(), label=label, confidence=conf, scores=scores)
+            text = _ollama_extract_text(outer).strip()
+            data = _parse_json_object(text) or {}
+            label = str(data.get("label") or "neutral").strip().lower()
+            label = _normalize_label(label)
+            conf = float(data.get("confidence") or 0.6)
+            conf = float(clamp(conf, 0.0, 1.0))
+            scores = _one_hot(label, conf)
+            return OllamaPrediction(updated_s=time.time(), label=label, confidence=conf, scores=scores)
+
+        with self._lock:
+            self._last_error = last_err or "Ollama unreachable"
+            self._last_error_s = time.time()
+        self._next_allowed_s = time.time() + 10.0
+        return None
 
 
 def _ollama_prompt(x: SpeechEmotionInput) -> str:
