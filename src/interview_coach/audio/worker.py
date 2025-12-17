@@ -473,25 +473,87 @@ def _apply_agc(chunk: np.ndarray, energy_rms: float, cfg: AudioConfig) -> np.nda
     return np.clip(chunk * gain, -1.0, 1.0).astype(np.float32)
 
 
+_TOKEN_EXPANSIONS: dict[str, tuple[str, ...]] = {
+    "kinda": ("kind", "of"),
+    "kindof": ("kind", "of"),
+    "sorta": ("sort", "of"),
+    "sortof": ("sort", "of"),
+    "alright": ("all", "right"),
+    "allright": ("all", "right"),
+    "ok": ("okay",),
+}
+
+_SOUND_PATTERNS: dict[str, re.Pattern[str]] = {
+    "uh": re.compile(r"^u+h+$"),
+    "um": re.compile(r"^u+h?m+$"),
+    "er": re.compile(r"^e+r+m*$"),
+    "oh": re.compile(r"^o+h+$"),
+    "huh": re.compile(r"^h+u+h+$"),
+    "hm": re.compile(r"^h+m+$"),
+}
+
+_PHRASE_VARIANTS: dict[tuple[str, ...], tuple[tuple[str, ...], ...]] = {
+    ("i", "mean"): (("i", "meant"),),
+    ("you", "know"): (("you", "no"),),
+}
+
+
+def _normalize_tokens(tokens: list[str]) -> list[str]:
+    out: list[str] = []
+    for tok in tokens:
+        t = tok.strip().lower()
+        if not t:
+            continue
+        exp = _TOKEN_EXPANSIONS.get(t)
+        if exp is not None:
+            out.extend(exp)
+        else:
+            out.append(t)
+    return out
+
+
 def _count_fillers(text: str, fillers: tuple[str, ...]) -> int:
-    t = (text or "").lower()
-    tokens = re.findall(r"[a-z']+", t)
+    tokens = _normalize_tokens(re.findall(r"[a-z']+", (text or "").lower()))
     if not tokens:
         return 0
 
-    total = 0
+    single_exact: set[str] = set()
+    single_sound: set[str] = set()
+    multi_phrases: set[tuple[str, ...]] = set()
+
     for filler in fillers:
-        f = (filler or "").lower().strip()
-        if not f:
-            continue
-        parts = re.findall(r"[a-z']+", f)
+        parts = _normalize_tokens(re.findall(r"[a-z']+", (filler or "").lower()))
         if not parts:
             continue
         if len(parts) == 1:
-            total += sum(1 for tok in tokens if tok == parts[0])
+            key = parts[0]
+            if key in _SOUND_PATTERNS:
+                single_sound.add(key)
+            else:
+                single_exact.add(key)
         else:
-            n = len(parts)
-            for i in range(0, len(tokens) - n + 1):
-                if tokens[i : i + n] == parts:
+            tup = tuple(parts)
+            multi_phrases.add(tup)
+            for v in _PHRASE_VARIANTS.get(tup, ()):
+                multi_phrases.add(v)
+
+    total = 0
+    if single_exact or single_sound:
+        for tok in tokens:
+            if tok in single_exact:
+                total += 1
+                continue
+            for key in single_sound:
+                if _SOUND_PATTERNS[key].fullmatch(tok):
                     total += 1
+                    break
+
+    for phrase in multi_phrases:
+        n = len(phrase)
+        if n <= 0 or len(tokens) < n:
+            continue
+        for i in range(0, len(tokens) - n + 1):
+            if tuple(tokens[i : i + n]) == phrase:
+                total += 1
+
     return int(total)
