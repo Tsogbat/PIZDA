@@ -80,6 +80,7 @@ class AudioWorker:
         self._last_window_s = 0.0
         self._last_emotion: tuple[str, dict[str, float]] = ("neutral", {"neutral": 1.0})
         self._last_pitch: float | None = None
+        self._hold_until_s = 0.0
 
         self._init_vosk()
 
@@ -159,6 +160,7 @@ class AudioWorker:
         self._last_window_s = 0.0
         self._last_emotion = ("neutral", {"neutral": 1.0})
         self._last_pitch = None
+        self._hold_until_s = 0.0
         self._ollama.reset()
 
         if self._vosk_model is not None:
@@ -173,6 +175,39 @@ class AudioWorker:
     def latest(self) -> AudioResult | None:
         with self._lock:
             return self._latest
+
+    def hold(self, seconds: float) -> None:
+        seconds = float(seconds)
+        if seconds <= 0:
+            return
+        self._hold_until_s = max(self._hold_until_s, time.time() + seconds)
+        self._partial = ""
+
+    def _refresh_hold_latest(self, now_s: float) -> None:
+        with self._lock:
+            prev = self._latest
+        if prev is None:
+            self._refresh_latest(now_s)
+            return
+        with self._lock:
+            self._latest = AudioResult(
+                timestamp_s=now_s,
+                speaking=prev.speaking,
+                partial_text="",
+                transcript_text=prev.transcript_text,
+                wpm=prev.wpm,
+                filler_count=prev.filler_count,
+                filler_per_min=prev.filler_per_min,
+                pause_count=prev.pause_count,
+                last_pause_s=prev.last_pause_s,
+                pitch_hz=prev.pitch_hz,
+                energy=prev.energy,
+                pitch_var=prev.pitch_var,
+                energy_var=prev.energy_var,
+                speech_emotion=prev.speech_emotion,
+                speech_emotion_scores=prev.speech_emotion_scores,
+                latency_ms=0.0,
+            )
 
     def _run(self) -> None:
         import sounddevice as sd  # type: ignore
@@ -213,6 +248,9 @@ class AudioWorker:
         now_s = time.time()
         if self._start_time_s is None:
             self._start_time_s = now_s
+        if now_s < self._hold_until_s:
+            self._refresh_hold_latest(now_s)
+            return
 
         energy = rms_energy(chunk)
         chunk_for_stt = _apply_agc(chunk, energy, self._cfg) if self._cfg.agc_enabled else chunk
@@ -449,10 +487,20 @@ class AudioWorker:
         heur = heuristic_speech_emotion(x)
         self._ollama.submit(x)
         pred = self._ollama.latest(max_age_s=10.0)
-        if pred is not None:
-            self._last_emotion = (pred.label, pred.scores)
-        else:
+        if pred is None:
             self._last_emotion = heur
+            return
+
+        heur_label, heur_scores = heur
+        heur_conf = float(max(heur_scores.values())) if heur_scores else 0.0
+
+        use_pred = False
+        if pred.label != "neutral":
+            use_pred = bool(pred.confidence >= 0.55)
+        else:
+            use_pred = bool(pred.confidence >= 0.88 and (heur_label == "neutral" or pred.confidence >= (heur_conf + 0.08)))
+
+        self._last_emotion = (pred.label, pred.scores) if use_pred else heur
 
 
 def _to_pcm16_bytes(chunk_f32: np.ndarray) -> bytes:

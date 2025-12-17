@@ -39,6 +39,8 @@ def heuristic_speech_emotion(x: SpeechEmotionInput) -> tuple[str, dict[str, floa
     pitch = float(x.pitch_hz or 0.0)
     pitch_var = float(x.pitch_var or 0.0)
     last_pause = float(x.last_pause_s or 0.0)
+    energy = float(x.energy or 0.0)
+    energy_var = float(x.energy_var or 0.0)
 
     fast = clamp((wpm - 170.0) / 45.0, 0.0, 1.0) if wpm > 0 else 0.0
     slow = clamp((110.0 - wpm) / 45.0, 0.0, 1.0) if wpm > 0 else 0.0
@@ -48,18 +50,22 @@ def heuristic_speech_emotion(x: SpeechEmotionInput) -> tuple[str, dict[str, floa
     pitch_hi = clamp((pitch - 160.0) / 90.0, 0.0, 1.0) if pitch > 0 else 0.0
     pitch_lo = clamp((150.0 - pitch) / 80.0, 0.0, 1.0) if pitch > 0 else 0.0
     pitch_var_hi = clamp((pitch_var - 25.0) / 25.0, 0.0, 1.0)
+    energy_hi = clamp((energy - 0.006) / 0.020, 0.0, 1.0)
+    energy_lo = clamp((0.010 - energy) / 0.008, 0.0, 1.0)
+    energy_var_hi = clamp((energy_var - 0.003) / 0.012, 0.0, 1.0)
 
-    anxious = clamp(0.45 * fast + 0.30 * filler_hi + 0.15 * pitch_var_hi + 0.10 * pause_hi, 0.0, 1.0)
-    happy = clamp(0.40 * _pace_score(wpm) + 0.35 * filler_lo + 0.25 * pitch_hi, 0.0, 1.0)
-    sad = clamp(0.50 * slow + 0.30 * pause_hi + 0.20 * pitch_lo, 0.0, 1.0)
-    angry = 0.0
+    anxious = clamp(0.35 * fast + 0.25 * filler_hi + 0.15 * pitch_var_hi + 0.10 * pause_hi + 0.15 * energy_var_hi, 0.0, 1.0)
+    happy = clamp(0.28 * _pace_score(wpm) + 0.22 * filler_lo + 0.30 * pitch_hi + 0.20 * energy_hi, 0.0, 1.0)
+    sad = clamp(0.36 * slow + 0.25 * pause_hi + 0.20 * pitch_lo + 0.19 * energy_lo, 0.0, 1.0)
+    angry_base = clamp(0.50 * energy_hi + 0.25 * fast + 0.25 * (1.0 - pitch_var_hi), 0.0, 1.0)
+    angry = float(angry_base * (0.45 + 0.55 * filler_lo))
 
     non_neutral = {"happy": happy, "sad": sad, "angry": angry, "anxious": anxious}
     best_label = max(non_neutral, key=non_neutral.get)
     best = float(non_neutral[best_label])
 
-    if best < 0.45:
-        return "neutral", _one_hot("neutral", 0.85)
+    if best < 0.40:
+        return "neutral", _one_hot("neutral", 0.82)
 
     conf = float(clamp(0.55 + 0.45 * best, 0.55, 0.99))
     return best_label, _one_hot(best_label, conf)

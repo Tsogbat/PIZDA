@@ -390,7 +390,12 @@ def _emotion_from_blendshapes(result: Any) -> tuple[str, dict[str, float]]:
         "fear": clamp(0.50 * eye_wide + 0.20 * jaw_open + 0.30 * mouth_stretch, 0.0, 1.0),
         "disgust": clamp(0.55 * nose_sneer + 0.25 * upper_up + 0.20 * mouth_press, 0.0, 1.0),
     }
-    raw["neutral"] = clamp(1.0 - max(raw.values() or [0.0]), 0.0, 1.0)
+    best_raw = float(max(raw.values() or [0.0]))
+    neutral_raw = clamp(0.65 - 1.5 * best_raw, 0.0, 1.0)
+    gamma = 0.7
+    boost = 1.2
+    raw = {k: clamp((float(v) ** gamma) * boost, 0.0, 1.0) for k, v in raw.items()}
+    raw["neutral"] = neutral_raw
 
     total = sum(raw.values()) + 1e-8
     scores = {k: float(v / total) for k, v in raw.items()}

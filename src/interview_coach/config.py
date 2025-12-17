@@ -73,6 +73,20 @@ class OllamaConfig:
 
 
 @dataclass(frozen=True)
+class InterviewConfig:
+    use_llm_questions: bool = True
+    num_questions: int = 8
+    target_role: str = ""
+
+
+@dataclass(frozen=True)
+class TTSConfig:
+    enabled: bool = True
+    rate_wpm: int = 185
+    voice: str | None = None
+
+
+@dataclass(frozen=True)
 class FusionConfig:
     w_eye_contact: float = 0.30
     w_face_emotion: float = 0.15
@@ -88,4 +102,6 @@ class AppConfig:
     vision: VisionConfig = VisionConfig()
     audio: AudioConfig = AudioConfig()
     ollama: OllamaConfig = OllamaConfig()
+    interview: InterviewConfig = InterviewConfig()
+    tts: TTSConfig = TTSConfig()
     fusion: FusionConfig = FusionConfig()

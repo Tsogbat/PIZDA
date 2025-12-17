@@ -25,6 +25,7 @@ from interview_coach.fusion import FusionEngine
 from interview_coach.interviewer import Interviewer
 from interview_coach.session import SessionRecorder, SessionSample
 from interview_coach.ui.widgets import Sparkline, Toast
+from interview_coach.tts import TextToSpeech
 from interview_coach.vision.worker import VisionWorker
 from interview_coach.audio.worker import AudioWorker
 from interview_coach.ui.post_session import PostSessionView
@@ -45,7 +46,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._cfg = cfg
         self._fusion = FusionEngine(cfg.fusion)
-        self._interviewer = Interviewer()
+        self._interviewer = Interviewer(cfg.interview, cfg.ollama)
+        self._tts = TextToSpeech(cfg.tts)
 
         self._vision = VisionWorker(cfg.vision, cfg.models)
         self._audio = AudioWorker(cfg.audio, cfg.models.vosk_model_dir, cfg.ollama)
@@ -59,6 +61,9 @@ class MainWindow(QMainWindow):
         self._session_active = False
         self._session_started_wall_s: float | None = None
         self._last_device_hint_s = 0.0
+        self._recorded_question_ids: set[str] = set()
+        self._active_question_id = "waiting"
+        self._active_question_index = -1
 
         self.setWindowTitle("Real-Time Interview Coach")
         self.setMinimumSize(1200, 720)
@@ -195,28 +200,32 @@ class MainWindow(QMainWindow):
         self._vision.reset()
         self._audio.reset()
         self._session.start()
+        self._recorded_question_ids = set()
+        self._active_question_id = "waiting"
+        self._active_question_index = -1
 
         q = self._interviewer.start()
-        self._question.setText(f"Q{self._interviewer.index + 1}/{self._interviewer.total}: {q.text}")
-        self._session.add_question_event(q.id, self._interviewer.index, q.text, "")
+        self._set_question(q, transcript_text="")
 
         self._vision.start()
         self._audio.start()
         self._session_active = True
         self._session_started_wall_s = time.time()
         self._btn_start.setEnabled(False)
-        self._btn_next.setEnabled(True)
+        self._btn_next.setEnabled(False)
         self._btn_end.setEnabled(True)
 
     def _on_next(self) -> None:
+        q_now = self._interviewer.current()
+        if not q_now.ready:
+            return
         q = self._interviewer.next()
         if q.id == "done":
             self._question.setText(q.text)
             self._btn_next.setEnabled(False)
             return
-        self._question.setText(f"Q{self._interviewer.index + 1}/{self._interviewer.total}: {q.text}")
         current_transcript = (self._audio.latest().transcript_text if self._audio.latest() else "")
-        self._session.add_question_event(q.id, self._interviewer.index, q.text, current_transcript)
+        self._set_question(q, transcript_text=current_transcript)
 
     def _on_end(self) -> None:
         self._btn_next.setEnabled(False)
@@ -224,6 +233,7 @@ class MainWindow(QMainWindow):
         self._btn_start.setEnabled(True)
         self._vision.stop()
         self._audio.stop()
+        self._tts.stop()
         self._session_active = False
         self._session_started_wall_s = None
         final_transcript = (self._audio.latest().transcript_text if self._audio.latest() else "")
@@ -245,10 +255,18 @@ class MainWindow(QMainWindow):
         try:
             self._vision.stop()
             self._audio.stop()
+            self._tts.stop()
+            self._interviewer.stop()
         finally:
             return super().closeEvent(event)
 
     def _tick(self) -> None:
+        if self._session_active:
+            q_ready = self._interviewer.poll()
+            if q_ready is not None:
+                current_transcript = (self._audio.latest().transcript_text if self._audio.latest() else "")
+                self._set_question(q_ready, transcript_text=current_transcript)
+
         v = self._vision.latest()
         a = self._audio.latest()
 
@@ -287,6 +305,31 @@ class MainWindow(QMainWindow):
 
         self._update_status(v, a, fr)
         self._maybe_device_hints(v, a)
+
+    def _set_question(self, q, transcript_text: str) -> None:
+        if q.id == "done":
+            self._question.setText(q.text)
+            self._btn_next.setEnabled(False)
+            return
+
+        idx = max(0, int(self._interviewer.index))
+        self._question.setText(f"Q{idx + 1}/{self._interviewer.total}: {q.text}")
+        self._btn_next.setEnabled(bool(q.ready) and (not self._interviewer.finished))
+
+        if not q.ready:
+            return
+
+        if q.id not in self._recorded_question_ids:
+            self._recorded_question_ids.add(q.id)
+            self._active_question_id = q.id
+            self._active_question_index = idx
+            self._session.add_question_event(q.id, idx, q.text, transcript_text)
+            self._speak_question(q.text)
+
+    def _speak_question(self, text: str) -> None:
+        dur_s = self._tts.speak(text)
+        if dur_s > 0:
+            self._audio.hold(dur_s)
 
     def _update_status(self, v, a, fr) -> None:
         parts = []
@@ -336,12 +379,11 @@ class MainWindow(QMainWindow):
             return
         self._last_sample_rel_s = rel
 
-        q = self._interviewer.current()
         self._session.record_sample(
             SessionSample(
                 t_rel_s=rel,
-                question_id=q.id,
-                question_index=self._interviewer.index,
+                question_id=self._active_question_id,
+                question_index=self._active_question_index,
                 eye_contact=(v.result.eye_contact if v else None),
                 face_emotion=(v.result.emotion if v else None),
                 speech_wpm=(a.wpm if a else None),

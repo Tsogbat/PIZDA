@@ -7,6 +7,7 @@ src/interview_coach/config.py
 src/interview_coach/fusion.py
 src/interview_coach/interviewer.py
 src/interview_coach/session.py
+src/interview_coach/tts.py
 src/interview_coach/audio/__init__.py
 src/interview_coach/audio/features.py
 src/interview_coach/audio/speech_emotion.py
