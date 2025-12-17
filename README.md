@@ -1,0 +1,153 @@
+# Real-Time Multimodal AI Interview Coach (Desktop HMI)
+
+Desktop Python HMI that runs a mock interview, observes the candidate via **camera + microphone** in real time, and provides:
+
+- Live coaching prompts (non-intrusive in-app toasts)
+- Live transcript + speaking metrics
+- Explainable **confidence score (0–100)** with a trend chart
+- Post-session analytics + exported reports (**CSV/JSON**)
+
+This project is **offline-first**: vision runs locally, Vosk STT runs locally, and the optional LLM refinement uses your **local Ollama** server (no cloud calls required).
+
+## What You Get
+
+**Live dashboard**
+
+- Camera preview
+- Eye-contact proxy (head pose)
+- Facial emotion (MediaPipe FaceLandmarker blendshapes → emotion mapping)
+- Live transcript (Vosk)
+- Speech rate (WPM), filler rate, pauses
+- Speech prosody (pitch/energy) + speech emotion (heuristics, optional Ollama refinement)
+- Confidence gauge + sparkline trend
+
+**Post-session analytics**
+
+- Session summary (avg/min/max confidence, avg eye contact, avg WPM, filler rate)
+- Latency stats (avg and p95 for vision/audio/fusion)
+- Trend sparklines (confidence, eye contact %, WPM, fillers/min)
+- Exported `reports/session_*.json` and `reports/session_*.csv`
+
+## Requirements
+
+- Python **3.10+** (recommended: **3.10–3.12** for best MediaPipe wheel availability)
+- A webcam and microphone (and OS permissions enabled)
+- macOS/Windows/Linux should work (PyQt6 + OpenCV + sounddevice + MediaPipe)
+
+## Install
+
+Using a venv:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .   # note the trailing dot (installs this repo as editable)
+```
+
+Alternative (no editable install):
+
+```bash
+pip install -r requirements.txt  # don't use -e with requirements.txt
+PYTHONPATH=src python3 -m interview_coach
+```
+
+Optional (better voice activity detection):
+
+- `webrtcvad` improves pause/speaking detection but may need Xcode license acceptance on macOS (see Troubleshooting).
+
+## Models Setup (Offline)
+
+### 1) Face landmarks + facial emotion (recommended)
+
+Download **MediaPipe FaceLandmarker** model:
+
+- Get `face_landmarker.task` from: `https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker#models`
+- Put it here: `models/face_landmarker.task`
+
+If the `.task` model is missing, the app will fall back to a simpler landmark pipeline (still runs, but facial emotion will be limited).
+
+### 2) Speech-to-text (Vosk)
+
+Download a Vosk English model from:
+
+- `https://alphacephei.com/vosk/models`
+
+Unzip into:
+
+- `models/vosk/<vosk-model-folder>/`
+
+Example:
+
+- `models/vosk/vosk-model-small-en-us-0.15/`
+
+### 3) Speech emotion (no file required)
+
+Speech emotion is computed from prosody + pacing heuristics by default. Optionally, it can be refined by **your local Ollama model** (default: `qwen3:8b`).
+
+- Ollama must be running locally at `http://localhost:11434`
+- Configure via `src/interview_coach/config.py` (`OllamaConfig`)
+- If Ollama is unavailable, the system automatically uses heuristics only
+
+## Run
+
+```bash
+python3 -m interview_coach
+```
+
+In the app:
+
+- Click **Start Interview**
+- Answer questions; click **Next Question** to advance
+- Click **End Session** to stop capture and open post-session analytics
+
+Exports are written to `reports/`.
+
+## Configuration
+
+Edit `src/interview_coach/config.py`:
+
+- Camera: `camera_index`, `analysis_fps`, `emotion_every_n_frames`
+- Audio: `sample_rate_hz`, `chunk_ms`, pause threshold, filler word list
+- Ollama: enable/disable, model name, timeout, call frequency
+- Fusion weights: `FusionConfig` (controls confidence score contributions)
+
+## How The Confidence Score Works
+
+The real-time confidence score is a weighted fusion of interpretable indicators (each normalized to **0–1**) and mapped to **0–100**:
+
+- Eye contact (head-pose proxy)
+- Facial emotion (blendshapes → emotion mapping)
+- Speech rate (WPM vs an interview-friendly range)
+- Fillers (per minute)
+- Long pauses
+- Speech emotion (prosody heuristics; optional Ollama refinement)
+
+You can tune the contribution of each indicator in `src/interview_coach/config.py` (`FusionConfig`).
+
+## Performance Tips
+
+- Reduce CPU load by lowering `VisionConfig.analysis_fps` (UI still targets ~30 FPS) - no longer supported
+- Increase `emotion_every_n_frames` to run facial emotion mapping less often
+- Disable Ollama refinement (`OllamaConfig.enabled = False`) to remove LLM overhead
+
+## Troubleshooting
+
+- **No camera preview**: check OS camera permissions; try `VisionConfig.camera_index = 1`
+- **No transcript**: confirm your Vosk model folder exists under `models/vosk/` and is fully unzipped
+- **No facial emotion**: confirm `models/face_landmarker.task` is present
+- **No Ollama refinement**: ensure `ollama serve` is running and the model is pulled (e.g. `ollama pull qwen3:8b`)
+- **`sounddevice` install/runtime issues**: you may need PortAudio (`brew install portaudio` on macOS; `apt-get install portaudio19-dev` on Debian/Ubuntu)
+- **macOS permissions**: enable Camera/Microphone access for your terminal app (or the Python interpreter) in System Settings → Privacy & Security
+- **`webrtcvad` build fails on macOS**: install Xcode Command Line Tools and accept the license:
+  - `xcode-select --install`
+  - `sudo xcodebuild -license accept`
+  - then `pip install webrtcvad`
+
+## Project Layout
+
+- `src/interview_coach/ui/` – PyQt6 dashboard and post-session views
+- `src/interview_coach/vision/` – camera pipeline (FaceLandmarker / FaceMesh fallback)
+- `src/interview_coach/audio/` – microphone pipeline (Vosk STT + metrics + prosody)
+- `src/interview_coach/fusion.py` – explainable indicator fusion → confidence score
+- `src/interview_coach/session.py` – time-series recording + CSV/JSON export
+- `docs/` – design + evaluation notes (`docs/DESIGN.md`, `docs/EVALUATION.md`)

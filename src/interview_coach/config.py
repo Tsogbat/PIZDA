@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class ModelPaths:
+    # Official MediaPipe model (download separately) used for landmarks + blendshapes.
+    face_landmarker_task: Path = Path("models/face_landmarker.task")
+    face_emotion_onnx: Path = Path("models/face_emotion.onnx")
+    vosk_model_dir: Path = Path("models/vosk")
+
+
+@dataclass(frozen=True)
+class VisionConfig:
+    camera_index: int = 0
+    display_fps: int = 30
+    analysis_fps: int = 30
+    min_detection_confidence: float = 0.6
+    min_tracking_confidence: float = 0.6
+    yaw_eye_contact_deg: float = 12.0
+    pitch_eye_contact_deg: float = 10.0
+    emotion_every_n_frames: int = 2
+    mirror_preview: bool = True
+
+
+@dataclass(frozen=True)
+class AudioConfig:
+    sample_rate_hz: int = 16000
+    channels: int = 1
+    chunk_ms: int = 200
+    pause_silence_ms: int = 700
+    vad_energy_threshold: float = 0.02
+    agc_enabled: bool = True
+    agc_target_rms: float = 0.03
+    agc_max_gain: float = 8.0
+    filler_words: tuple[str, ...] = ("um", "uh", "like", "you know", "actually", "basically")
+
+
+@dataclass(frozen=True)
+class OllamaConfig:
+    enabled: bool = True
+    host: str = "http://localhost:11434"
+    model: str = "qwen3:8b"
+    timeout_s: float = 2.0
+    min_interval_s: float = 3.0
+
+
+@dataclass(frozen=True)
+class FusionConfig:
+    w_eye_contact: float = 0.30
+    w_face_emotion: float = 0.15
+    w_speech_rate: float = 0.15
+    w_fillers: float = 0.15
+    w_pauses: float = 0.10
+    w_speech_emotion: float = 0.15
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    models: ModelPaths = ModelPaths()
+    vision: VisionConfig = VisionConfig()
+    audio: AudioConfig = AudioConfig()
+    ollama: OllamaConfig = OllamaConfig()
+    fusion: FusionConfig = FusionConfig()

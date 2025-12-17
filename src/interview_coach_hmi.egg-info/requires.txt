@@ -1,0 +1,7 @@
+numpy>=1.24
+opencv-python>=4.8
+mediapipe>=0.10
+sounddevice>=0.4
+scipy>=1.10
+PyQt6>=6.5
+vosk>=0.3
