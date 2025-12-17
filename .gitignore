@@ -11,5 +11,8 @@ env/
 .ruff_cache/
 .DS_Store
 
-reports/
+reports/**
 
+models/**
+
+!models/README.md
