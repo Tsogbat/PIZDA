@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -7,12 +8,14 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QScrollArea,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from interview_coach.analytics import coaching_recommendations, summarize_session
+from interview_coach.analytics import coaching_report_text
 from interview_coach.ui.widgets import Sparkline
 
 
@@ -28,6 +31,7 @@ class PostSessionView(QWidget):
             """
             QWidget { background: #0b1220; color: #e2e8f0; }
             QTextEdit { background: #0f172a; border: 1px solid #243047; border-radius: 10px; padding: 10px; }
+            QFrame#Card { background: #0f172a; border: 1px solid #243047; border-radius: 12px; }
             """
         )
         self._build()
@@ -35,131 +39,109 @@ class PostSessionView(QWidget):
     def _build(self) -> None:
         root = QVBoxLayout(self)
 
-        title = QLabel("Session Summary")
+        title = QLabel("Post-Session Analytics")
         title.setStyleSheet("font-size: 18px; font-weight: 700;")
         root.addWidget(title)
 
-        summary = summarize_session(self._session)
+        tabs = QTabWidget()
+        root.addWidget(tabs, 1)
 
-        grid_frame = QFrame()
-        grid_frame.setStyleSheet("QFrame { background: #0f172a; border: 1px solid #243047; border-radius: 12px; }")
-        grid = QGridLayout(grid_frame)
-        grid.addWidget(_kv("Duration (s)", _fmt(summary.get("duration_s"))), 0, 0)
-        grid.addWidget(_kv("Avg Confidence", _fmt(summary.get("confidence_avg"))), 0, 1)
-        grid.addWidget(_kv("Min / Max", f"{_fmt(summary.get('confidence_min'))} / {_fmt(summary.get('confidence_max'))}"), 1, 0)
-        grid.addWidget(_kv("Avg Eye Contact", _fmt(summary.get("eye_contact_avg"))), 1, 1)
-        grid.addWidget(_kv("Avg WPM", _fmt(summary.get("speech_wpm_avg"))), 2, 0)
-        grid.addWidget(_kv("Fillers (/min)", _fmt(summary.get("fillers_per_min_avg"))), 2, 1)
-        grid.addWidget(_kv("Long Pauses (total)", _fmt(summary.get("pause_count_total"))), 3, 0)
-        grid.addWidget(_kv("Long Pauses (/min)", _fmt(summary.get("pause_per_min"))), 3, 1)
-        grid.addWidget(_kv("Dominant Face", str(summary.get("dominant_face_emotion") or "-")), 4, 0)
-        grid.addWidget(_kv("Dominant Speech", str(summary.get("dominant_speech_emotion") or "-")), 4, 1)
-        grid.addWidget(
-            _kv(
-                "Vision Latency (avg/p95 ms)",
-                f"{_fmt(summary.get('vision_latency_ms_avg'))} / {_fmt(summary.get('vision_latency_ms_p95'))}",
-            ),
-            5,
-            0,
-        )
-        grid.addWidget(
-            _kv(
-                "Audio Latency (avg/p95 ms)",
-                f"{_fmt(summary.get('audio_latency_ms_avg'))} / {_fmt(summary.get('audio_latency_ms_p95'))}",
-            ),
-            5,
-            1,
-        )
-        grid.addWidget(
-            _kv(
-                "Fusion Latency (avg/p95 ms)",
-                f"{_fmt(summary.get('fusion_latency_ms_avg'))} / {_fmt(summary.get('fusion_latency_ms_p95'))}",
-            ),
-            6,
-            0,
-        )
-        root.addWidget(grid_frame)
+        report_tab = QWidget()
+        report_layout = QVBoxLayout(report_tab)
 
         rec_title = QLabel("General Feedback")
         rec_title.setStyleSheet("font-size: 16px; font-weight: 650; margin-top: 8px;")
-        root.addWidget(rec_title)
+        report_layout.addWidget(rec_title)
         rec = QTextEdit()
         rec.setReadOnly(True)
-        bullets = "\n".join(f"- {r}" for r in coaching_recommendations(self._session))
-        rec.setPlainText(bullets)
-        rec.setMinimumHeight(110)
-        root.addWidget(rec)
-
-        charts_title = QLabel("Trends")
-        charts_title.setStyleSheet("font-size: 16px; font-weight: 650; margin-top: 8px;")
-        root.addWidget(charts_title)
-
-        charts = QFrame()
-        charts.setStyleSheet("QFrame { background: #0f172a; border: 1px solid #243047; border-radius: 12px; }")
-        charts_layout = QGridLayout(charts)
-
-        conf = Sparkline(max_points=240)
-        eye = Sparkline(max_points=240)
-        wpm = Sparkline(max_points=240)
-        filler = Sparkline(max_points=240)
-
-        for s in self._session.get("samples") or []:
-            conf.add(s.get("confidence_0_100") or 0.0)
-            eye.add((s.get("eye_contact") or 0.0) * 100.0)
-            wpm.add(s.get("speech_wpm") or 0.0)
-            filler.add(s.get("filler_per_min") or 0.0)
-
-        charts_layout.addWidget(_chart("Confidence", conf), 0, 0)
-        charts_layout.addWidget(_chart("Eye Contact %", eye), 0, 1)
-        charts_layout.addWidget(_chart("WPM", wpm), 1, 0)
-        charts_layout.addWidget(_chart("Fillers/min", filler), 1, 1)
-        root.addWidget(charts, 1)
+        rec.setPlainText(coaching_report_text(self._session))
+        rec.setMinimumHeight(220)
+        report_layout.addWidget(rec)
 
         export_title = QLabel("Exports")
         export_title.setStyleSheet("font-size: 16px; font-weight: 650; margin-top: 8px;")
-        root.addWidget(export_title)
+        report_layout.addWidget(export_title)
 
         export_row = QHBoxLayout()
         export_row.addWidget(QLabel(f"JSON: {self._json_path}"))
         export_row.addWidget(QLabel(f"CSV: {self._csv_path}"))
         export_row.addStretch(1)
-        root.addLayout(export_row)
+        report_layout.addLayout(export_row)
 
         transcript_title = QLabel("Transcript")
         transcript_title.setStyleSheet("font-size: 16px; font-weight: 650; margin-top: 8px;")
-        root.addWidget(transcript_title)
+        report_layout.addWidget(transcript_title)
         transcript = QTextEdit()
         transcript.setReadOnly(True)
         transcript.setPlainText(self._session.get("transcript") or "")
-        root.addWidget(transcript)
+        report_layout.addWidget(transcript, 1)
+
+        tabs.addTab(report_tab, "Report")
+
+        trends_tab = QWidget()
+        self._build_trends(trends_tab)
+        tabs.addTab(trends_tab, "Trends")
+
+    def _build_trends(self, parent: QWidget) -> None:
+        layout = QVBoxLayout(parent)
+
+        hint = QLabel("Time-series charts from recorded session samples.")
+        hint.setStyleSheet("color: #cbd5e1;")
+        layout.addWidget(hint)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        layout.addWidget(scroll, 1)
+
+        body = QWidget()
+        grid = QGridLayout(body)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
+        scroll.setWidget(body)
+
+        samples = self._session.get("samples") or []
+        confidence = [float(s.get("confidence_0_100")) for s in samples if s.get("confidence_0_100") is not None]
+        eye = [float(s.get("eye_contact")) * 100.0 for s in samples if s.get("eye_contact") is not None]
+        wpm = [float(s.get("speech_wpm")) for s in samples if s.get("speech_wpm") is not None]
+        fillers = [float(s.get("filler_per_min")) for s in samples if s.get("filler_per_min") is not None]
+        pauses = [float(s.get("pause_count")) for s in samples if s.get("pause_count") is not None]
+
+        grid.addWidget(self._trend_card("Confidence (0–100)", confidence), 0, 0, 1, 2)
+        grid.addWidget(self._trend_card("Eye Contact (%)", eye), 1, 0)
+        grid.addWidget(self._trend_card("Speech Rate (WPM)", wpm), 1, 1)
+        grid.addWidget(self._trend_card("Fillers (/min)", fillers), 2, 0)
+        grid.addWidget(self._trend_card("Long Pauses (count)", pauses), 2, 1)
+        grid.setRowStretch(3, 1)
+
+    def _trend_card(self, title: str, values: list[float]) -> QFrame:
+        card = QFrame()
+        card.setObjectName("Card")
+        card.setMinimumHeight(220)
+        layout = QVBoxLayout(card)
+
+        t = QLabel(title)
+        t.setStyleSheet("font-size: 13px; color: #cbd5e1;")
+        layout.addWidget(t)
+
+        if not values:
+            empty = QLabel("No data recorded for this signal.")
+            empty.setStyleSheet("color: #94a3b8;")
+            layout.addWidget(empty, 1)
+            return card
+
+        values = _downsample(values, 600)
+        spark = Sparkline(max_points=max(60, len(values)))
+        spark.setMinimumHeight(150)
+        spark.extend(values)
+        layout.addWidget(spark, 1)
+        return card
 
 
-def _kv(k: str, v: str) -> QWidget:
-    w = QWidget()
-    w.setStyleSheet("QLabel { color: #e2e8f0; }")
-    layout = QVBoxLayout(w)
-    kk = QLabel(k)
-    kk.setStyleSheet("font-size: 12px; color: #cbd5e1;")
-    vv = QLabel(v)
-    vv.setStyleSheet("font-size: 20px; font-weight: 700;")
-    layout.addWidget(kk)
-    layout.addWidget(vv)
-    return w
-
-
-def _chart(title: str, widget: QWidget) -> QWidget:
-    w = QWidget()
-    layout = QVBoxLayout(w)
-    t = QLabel(title)
-    t.setStyleSheet("font-size: 12px; color: #cbd5e1;")
-    layout.addWidget(t)
-    layout.addWidget(widget)
-    return w
-
-
-def _fmt(x) -> str:
-    if x is None:
-        return "-"
-    if isinstance(x, float):
-        return f"{x:.2f}"
-    return str(x)
+def _downsample(values: list[float], max_points: int) -> list[float]:
+    if max_points <= 0:
+        return []
+    n = len(values)
+    if n <= max_points:
+        return values
+    stride = int(math.ceil(n / float(max_points)))
+    return values[:: max(1, stride)]

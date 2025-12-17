@@ -101,3 +101,115 @@ def coaching_recommendations(session: dict) -> list[str]:
         recs.append("Overall: strong baseline. Keep eye contact steady and maintain a consistent pace.")
 
     return recs
+
+
+def coaching_report_text(session: dict) -> str:
+    s = summarize_session(session)
+    recs = coaching_recommendations(session)
+
+    lines: list[str] = []
+
+    lines.append("Overview")
+    dur = s.get("duration_s")
+    if isinstance(dur, (int, float)) and dur:
+        lines.append(f"- Duration: {_fmt_duration(float(dur))}")
+    if s.get("confidence_avg") is not None:
+        lines.append(
+            f"- Confidence: avg {_fmt_num(s.get('confidence_avg'))} (min {_fmt_num(s.get('confidence_min'))}, max {_fmt_num(s.get('confidence_max'))})"
+        )
+    if s.get("eye_contact_avg") is not None:
+        lines.append(f"- Eye contact: {_fmt_pct(s.get('eye_contact_avg'))}")
+    if s.get("speech_wpm_avg") is not None:
+        lines.append(f"- Speech rate: {_fmt_num(s.get('speech_wpm_avg'))} WPM")
+    if s.get("fillers_per_min_avg") is not None:
+        lines.append(f"- Filler rate: {_fmt_num(s.get('fillers_per_min_avg'))}/min")
+    if s.get("pause_per_min") is not None:
+        lines.append(f"- Long pauses: {_fmt_num(s.get('pause_per_min'))}/min (total {_fmt_int(s.get('pause_count_total'))})")
+    if s.get("dominant_face_emotion") or s.get("dominant_speech_emotion"):
+        lines.append(
+            f"- Dominant emotions: face={s.get('dominant_face_emotion') or '-'}; speech={s.get('dominant_speech_emotion') or '-'}"
+        )
+
+    strengths = _strengths_from_summary(s)
+    if strengths:
+        lines.append("")
+        lines.append("What went well")
+        for x in strengths:
+            lines.append(f"- {x}")
+
+    lines.append("")
+    lines.append("What to improve / fixes")
+    for r in recs:
+        lines.append(f"- {r}")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def _strengths_from_summary(s: dict) -> list[str]:
+    out: list[str] = []
+    conf = s.get("confidence_avg")
+    if isinstance(conf, (int, float)):
+        if conf >= 75:
+            out.append("Overall confidence stayed strong.")
+        elif conf >= 60:
+            out.append("Overall confidence was steady.")
+
+    eye = s.get("eye_contact_avg")
+    if isinstance(eye, (int, float)):
+        if eye >= 0.7:
+            out.append("Eye contact was consistently good.")
+        elif eye >= 0.55:
+            out.append("Eye contact was decent; keep it steady between thoughts.")
+
+    wpm = s.get("speech_wpm_avg")
+    if isinstance(wpm, (int, float)) and wpm > 0:
+        if 110 <= wpm <= 160:
+            out.append("Speech pacing was in a strong interview range (110–160 WPM).")
+
+    fillers = s.get("fillers_per_min_avg")
+    if isinstance(fillers, (int, float)):
+        if fillers <= 2.0:
+            out.append("Filler word usage was low.")
+        elif fillers <= 3.5:
+            out.append("Filler word usage was manageable.")
+
+    pauses = s.get("pause_per_min")
+    if isinstance(pauses, (int, float)):
+        if pauses <= 1.0:
+            out.append("Long pauses were rare.")
+
+    return out
+
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    m = int(seconds // 60.0)
+    s = int(round(seconds - m * 60))
+    if m <= 0:
+        return f"{s}s"
+    return f"{m}m {s:02d}s"
+
+
+def _fmt_pct(x) -> str:
+    try:
+        return f"{float(x) * 100.0:.0f}%"
+    except Exception:
+        return "-"
+
+
+def _fmt_num(x) -> str:
+    if x is None:
+        return "-"
+    try:
+        return f"{float(x):.1f}"
+    except Exception:
+        return str(x)
+
+
+def _fmt_int(x) -> str:
+    if x is None:
+        return "-"
+    try:
+        return str(int(x))
+    except Exception:
+        return str(x)

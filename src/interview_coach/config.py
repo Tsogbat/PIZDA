@@ -35,7 +35,25 @@ class AudioConfig:
     agc_enabled: bool = True
     agc_target_rms: float = 0.03
     agc_max_gain: float = 8.0
-    filler_words: tuple[str, ...] = ("um", "uh", "like", "you know", "actually", "basically")
+    filler_words: tuple[str, ...] = (
+        "um",
+        "uh",
+        "uhm",
+        "umm",
+        "hmm",
+        "hm",
+        "like",
+        "you know",
+        "i mean",
+        "sort of",
+        "kind of",
+        "actually",
+        "basically",
+        "literally",
+        "well",
+        "so",
+        "okay",
+    )
 
 
 @dataclass(frozen=True)

@@ -59,6 +59,7 @@ class AudioWorker:
         self._start_time_s: float | None = None
         self._transcript: list[str] = []
         self._partial: str = ""
+        self._last_stt_activity_s: float | None = None
 
         self._word_events: deque[tuple[float, int]] = deque(maxlen=6000)  # ~20min @ 1Hz-ish
         self._filler_count = 0
@@ -141,6 +142,7 @@ class AudioWorker:
         self._start_time_s = None
         self._transcript = []
         self._partial = ""
+        self._last_stt_activity_s = None
         self._word_events.clear()
         self._filler_count = 0
         self._speaking = False
@@ -215,10 +217,12 @@ class AudioWorker:
         energy = rms_energy(chunk)
         chunk_for_stt = _apply_agc(chunk, energy, self._cfg) if self._cfg.agc_enabled else chunk
         pcm16_bytes = _to_pcm16_bytes(chunk_for_stt)
-        speaking = self._speech_from_vad(pcm16_bytes) if self._vad is not None else self._speech_from_energy(energy)
+        speaking_raw = self._speech_from_vad(pcm16_bytes) if self._vad is not None else self._speech_from_energy(energy)
 
-        self._update_pause_state(now_s, speaking)
         self._update_stt(pcm16_bytes)
+        stt_active = bool(self._last_stt_activity_s is not None and (now_s - float(self._last_stt_activity_s)) < 0.6)
+        speaking = bool(speaking_raw or stt_active)
+        self._update_pause_state(now_s, speaking)
 
         transcript = " ".join(self._transcript).strip()
         wpm = self._compute_wpm(now_s)
@@ -278,10 +282,13 @@ class AudioWorker:
                 text = (res.get("text") or "").strip()
                 if text:
                     self._append_final_text(text)
+                    self._last_stt_activity_s = time.time()
                 self._partial = ""
             else:
                 res = json.loads(self._vosk_rec.PartialResult() or "{}")
                 self._partial = (res.get("partial") or "").strip()
+                if self._partial:
+                    self._last_stt_activity_s = time.time()
         except Exception:
             return
 
@@ -291,7 +298,7 @@ class AudioWorker:
         words = [w for w in text.split() if w]
         self._word_events.append((time.time(), len(words)))
 
-        self._filler_count += _count_fillers(text, self._cfg.filler_words)
+        self._filler_count = _count_fillers(" ".join(self._transcript), self._cfg.filler_words)
 
     def _flush_vosk_final(self) -> None:
         if self._vosk_rec is None:
@@ -301,6 +308,7 @@ class AudioWorker:
             text = (res.get("text") or "").strip()
             if text:
                 self._append_final_text(text)
+                self._last_stt_activity_s = time.time()
             self._partial = ""
         except Exception:
             return

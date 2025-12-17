@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Iterable
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPainter, QPen
@@ -15,6 +16,10 @@ class Sparkline(QWidget):
 
     def add(self, v: float) -> None:
         self._values.append(float(v))
+        self.update()
+
+    def extend(self, values: Iterable[float]) -> None:
+        self._values.extend(float(v) for v in values)
         self.update()
 
     def clear(self) -> None:
@@ -83,4 +88,3 @@ class Toast(QWidget):
         painter.fillRect(self.rect(), QColor(15, 23, 42, 230))
         painter.setPen(QPen(QColor("#e2e8f0")))
         painter.drawText(self.rect().adjusted(12, 8, -12, -8), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._text)
-

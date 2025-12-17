@@ -32,50 +32,47 @@ SPEECH_EMOTION_LABELS: tuple[str, ...] = ("neutral", "happy", "sad", "angry", "a
 
 def heuristic_speech_emotion(x: SpeechEmotionInput) -> tuple[str, dict[str, float]]:
     if not x.speaking:
-        return "neutral", _one_hot("neutral", 1.0)
+        return "neutral", _one_hot("neutral", 0.9)
 
     wpm = float(x.wpm or 0.0)
     fillers = float(x.filler_per_min or 0.0)
-    pitch = x.pitch_hz
-    pitch_var = x.pitch_var
-    energy = float(x.energy or 0.0)
+    pitch = float(x.pitch_hz or 0.0)
+    pitch_var = float(x.pitch_var or 0.0)
     last_pause = float(x.last_pause_s or 0.0)
 
-    anxious = 0.0
-    anxious += max(0.0, wpm - 165.0) / 90.0
-    anxious += max(0.0, fillers - 4.0) / 8.0
-    anxious += max(0.0, (pitch_var or 0.0) - 35.0) / 30.0
-    anxious += max(0.0, last_pause - 2.5) / 4.0
-    anxious = clamp(anxious / 2.2, 0.0, 1.0)
+    fast = clamp((wpm - 170.0) / 45.0, 0.0, 1.0) if wpm > 0 else 0.0
+    slow = clamp((110.0 - wpm) / 45.0, 0.0, 1.0) if wpm > 0 else 0.0
+    filler_hi = clamp((fillers - 4.0) / 6.0, 0.0, 1.0)
+    filler_lo = clamp((4.0 - fillers) / 4.0, 0.0, 1.0)
+    pause_hi = clamp((last_pause - 2.5) / 3.0, 0.0, 1.0)
+    pitch_hi = clamp((pitch - 160.0) / 90.0, 0.0, 1.0) if pitch > 0 else 0.0
+    pitch_lo = clamp((150.0 - pitch) / 80.0, 0.0, 1.0) if pitch > 0 else 0.0
+    pitch_var_hi = clamp((pitch_var - 25.0) / 25.0, 0.0, 1.0)
 
-    sad = 0.0
-    sad += max(0.0, 105.0 - wpm) / 70.0
-    sad += max(0.0, 0.02 - energy) / 0.02
-    if pitch is not None:
-        sad += max(0.0, 130.0 - pitch) / 60.0
-    sad = clamp(sad / 2.0, 0.0, 1.0)
-
+    anxious = clamp(0.45 * fast + 0.30 * filler_hi + 0.15 * pitch_var_hi + 0.10 * pause_hi, 0.0, 1.0)
+    happy = clamp(0.40 * _pace_score(wpm) + 0.35 * filler_lo + 0.25 * pitch_hi, 0.0, 1.0)
+    sad = clamp(0.50 * slow + 0.30 * pause_hi + 0.20 * pitch_lo, 0.0, 1.0)
     angry = 0.0
-    angry += max(0.0, energy - 0.045) / 0.06
-    angry += max(0.0, wpm - 135.0) / 80.0
-    if pitch is not None:
-        angry += max(0.0, 160.0 - pitch) / 90.0
-    angry = clamp(angry / 2.2, 0.0, 1.0)
 
-    happy = 0.0
-    if 110.0 <= wpm <= 160.0:
-        happy += 0.5
-    happy += max(0.0, energy - 0.025) / 0.05
-    happy += max(0.0, 3.0 - fillers) / 6.0
-    happy = clamp(happy / 2.0, 0.0, 1.0)
+    non_neutral = {"happy": happy, "sad": sad, "angry": angry, "anxious": anxious}
+    best_label = max(non_neutral, key=non_neutral.get)
+    best = float(non_neutral[best_label])
 
-    neutral = clamp(1.0 - max(happy, sad, angry, anxious), 0.0, 1.0)
+    if best < 0.45:
+        return "neutral", _one_hot("neutral", 0.85)
 
-    raw = {"neutral": neutral, "happy": happy, "sad": sad, "angry": angry, "anxious": anxious}
-    total = sum(raw.values()) + 1e-8
-    scores = {k: float(v / total) for k, v in raw.items()}
-    label = max(scores, key=scores.get) if scores else "neutral"
-    return label, scores
+    conf = float(clamp(0.55 + 0.45 * best, 0.55, 0.99))
+    return best_label, _one_hot(best_label, conf)
+
+
+def _pace_score(wpm: float) -> float:
+    if wpm <= 0:
+        return 0.5
+    # Peak at ~135 WPM; declines outside ~110–160.
+    peak = 135.0
+    width = 35.0
+    score = 1.0 - (abs(wpm - peak) / width)
+    return float(clamp(score, 0.0, 1.0))
 
 
 @dataclass(frozen=True)
