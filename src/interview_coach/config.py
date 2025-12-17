@@ -118,6 +118,7 @@ class OllamaConfig:
 class InterviewConfig:
     use_llm_questions: bool = True
     num_questions: int = 8
+    warmup_count: int = 2
     target_role: str = "Data analyst"
 
 

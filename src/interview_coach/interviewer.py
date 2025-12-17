@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
+import random
 import re
 import threading
 import time
@@ -18,23 +19,24 @@ class InterviewQuestion:
     id: str
     text: str
     ready: bool = True
-    source: str = "predefined"  # "predefined" | "llm"
+    source: str = "predefined"  # "predefined" | "warmup" | "fallback" | "llm"
 
 
 DEFAULT_QUESTIONS: tuple[InterviewQuestion, ...] = (
     InterviewQuestion("intro", "Tell me about yourself."),
+    InterviewQuestion("resume", "Walk me through your resume."),
     InterviewQuestion("strength", "What is one of your strengths, and how has it helped you at work or school?"),
     InterviewQuestion("weakness", "What is a weakness you are working on, and what steps are you taking to improve?"),
     InterviewQuestion("conflict", "Describe a time you had a conflict in a team. What did you do?"),
     InterviewQuestion("leadership", "Tell me about a time you showed leadership."),
     InterviewQuestion("failure", "Tell me about a time you failed. What did you learn?"),
-    InterviewQuestion("pressure", "How do you handle pressure or tight deadlines?"),
     InterviewQuestion("why_role", "Why are you interested in this role, and why should we hire you?"),
 )
 
 
 @dataclass(frozen=True)
 class _QuestionRequest:
+    session_key: int
     index: int
     total: int
     history: tuple[str, ...]
@@ -43,6 +45,7 @@ class _QuestionRequest:
 
 @dataclass(frozen=True)
 class _QuestionResponse:
+    session_key: int
     updated_s: float
     index: int
     text: str | None
@@ -116,74 +119,98 @@ class OllamaInterviewQuestionClient:
                     self._last_error_s = float(resp.updated_s)
 
     def _infer(self, req: _QuestionRequest) -> _QuestionResponse:
-        prompt = _ollama_question_prompt(req)
         timeout_s = float(getattr(self._cfg, "question_timeout_s", self._cfg.timeout_s))
         t2 = float(min(max(timeout_s * 2.0, timeout_s + 4.0), 90.0))
         timeouts = tuple(dict.fromkeys([timeout_s, t2]))
-
-        payloads: tuple[tuple[str, dict], ...] = (
-            (
-                "/api/chat",
-                {
-                    "model": self._cfg.model,
-                    "messages": [
-                        {"role": "system", "content": "You are a mock interview AI interviewer."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "stream": False,
-                    "format": "json",
-                    "options": {"temperature": 0.3, "num_predict": 80},
-                },
-            ),
-            (
-                "/api/generate",
-                {
-                    "model": self._cfg.model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": {"temperature": 0.3, "num_predict": 80},
-                },
-            ),
-        )
+        history_norm = {_normalize_for_compare(h) for h in req.history if h}
 
         last_err: str | None = None
         for attempt, t in enumerate(timeouts):
+            prompt = _ollama_question_prompt(req, retry=attempt)
+            seed = _variation_seed(req.session_key, req.index, attempt)
+            payloads: tuple[tuple[str, dict], ...] = (
+                (
+                    "/api/chat",
+                    {
+                        "model": self._cfg.model,
+                        "messages": [
+                            {"role": "system", "content": "You are a mock interview AI interviewer."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "stream": False,
+                        "format": "json",
+                        "options": {"temperature": 0.35, "num_predict": 80, "seed": seed},
+                    },
+                ),
+                (
+                    "/api/generate",
+                    {
+                        "model": self._cfg.model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "format": "json",
+                        "options": {"temperature": 0.35, "num_predict": 80, "seed": seed},
+                    },
+                ),
+            )
+
             for path, payload in payloads:
-                outer, err = _ollama_post_json(self._cfg.host, path, payload, t)
-                if err and _ollama_looks_like_format_error(err):
-                    payload2 = dict(payload)
-                    payload2.pop("format", None)
-                    outer, err = _ollama_post_json(self._cfg.host, path, payload2, t)
-                if err:
-                    last_err = err
-                    continue
-                if outer is None:
-                    last_err = last_err or "request failed"
-                    continue
+                for allow_no_format in (False, True):
+                    payload_try = dict(payload)
+                    if allow_no_format:
+                        payload_try.pop("format", None)
 
-                raw = _ollama_extract_text(outer).strip()
-                data = _parse_json_object(raw) or {}
-                text = str(data.get("question") or "").strip()
-                if not text:
-                    text = raw.splitlines()[0].strip() if raw else ""
+                    outer, err = _ollama_post_json(self._cfg.host, path, payload_try, t)
+                    if err and _ollama_looks_like_format_error(err):
+                        payload2 = dict(payload_try)
+                        payload2.pop("format", None)
+                        outer, err = _ollama_post_json(self._cfg.host, path, payload2, t)
+                    if err:
+                        last_err = err
+                        if allow_no_format:
+                            break
+                        continue
+                    if outer is None:
+                        last_err = last_err or "request failed"
+                        if allow_no_format:
+                            break
+                        continue
 
-                text = _sanitize_question(text)
-                if text:
-                    return _QuestionResponse(updated_s=time.time(), index=req.index, text=text, error=None)
-                last_err = "empty question"
+                    raw = _ollama_extract_text(outer).strip()
+                    data = _parse_json_object(raw) or {}
+                    text = str(data.get("question") or "").strip()
+                    if not text:
+                        text = raw.splitlines()[0].strip() if raw else ""
+
+                    text = _sanitize_question(text)
+                    if not _is_valid_question(text):
+                        last_err = "invalid question"
+                        continue
+                    if _normalize_for_compare(text) in history_norm:
+                        last_err = "duplicate question"
+                        continue
+
+                    return _QuestionResponse(session_key=req.session_key, updated_s=time.time(), index=req.index, text=text, error=None)
+                # next path
 
             if attempt == 0:
                 time.sleep(0.2)
 
-        return _QuestionResponse(updated_s=time.time(), index=req.index, text=None, error=last_err or "request failed")
+        return _QuestionResponse(
+            session_key=req.session_key,
+            updated_s=time.time(),
+            index=req.index,
+            text=None,
+            error=last_err or "request failed",
+        )
 
 
-def _ollama_question_prompt(req: _QuestionRequest) -> str:
+def _ollama_question_prompt(req: _QuestionRequest, retry: int = 0) -> str:
     role = (req.target_role or "").strip()
     role_line = f"Target role: {role}" if role else "Target role: (not specified)"
     history = [h.strip() for h in req.history if h and h.strip()]
     history_txt = "\n".join(f"- {h}" for h in history[-8:]) if history else "- (none)"
+    variation = _variation_seed(req.session_key, req.index, retry)
 
     return (
         "You are a mock interview AI interviewer.\n"
@@ -191,10 +218,13 @@ def _ollama_question_prompt(req: _QuestionRequest) -> str:
         "Constraints:\n"
         f"- This is question {req.index + 1} of {req.total}.\n"
         f"- {role_line}\n"
+        "- Output MUST be in English only (no Chinese or other languages).\n"
+        "- Output MUST be an interview question (not placeholders like /HEIGHT).\n"
         "- Do NOT repeat or paraphrase previous questions.\n"
         "- Keep it concise (<= 22 words).\n"
         "- If a target role is provided, tailor the question to that role's typical responsibilities.\n"
         "- Prefer behavioral or role-relevant questions; mix topics (strengths/weaknesses/conflict/leadership/failure/impact/why this role).\n"
+        f"- Internal variation key: {variation} (do not mention it).\n"
         "\n"
         "Previous questions:\n"
         f"{history_txt}\n"
@@ -205,10 +235,50 @@ def _ollama_question_prompt(req: _QuestionRequest) -> str:
 
 def _sanitize_question(text: str) -> str:
     text = (text or "").strip()
+    text = text.replace("\u200b", "").replace("\ufeff", "")
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"^(question\\s*[:\\-]\\s*)", "", text, flags=re.IGNORECASE).strip()
-    text = text.strip("\"' \t")
+    text = text.strip("\"' \t\r\n")
     return text
+
+
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
+
+def _is_valid_question(text: str) -> bool:
+    text = (text or "").strip()
+    if not text:
+        return False
+    if _CJK_RE.search(text):
+        return False
+    if len(text) < 12:
+        return False
+    if len(text) > 180:
+        return False
+    words = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", text)
+    if len(words) < 4:
+        return False
+    ascii_letters = sum(1 for c in text if c.isascii() and c.isalpha())
+    if ascii_letters < 10:
+        return False
+    if text.lstrip().startswith("/") and len(words) <= 6:
+        return False
+    return True
+
+
+def _normalize_for_compare(text: str) -> str:
+    text = (text or "").lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _variation_seed(session_key: int, index: int, retry: int) -> int:
+    # 32-bit mix; stable across process, different across sessions/questions/retries.
+    x = int(session_key) & 0xFFFFFFFF
+    x ^= (int(index) + 1) * 0x9E3779B1
+    x ^= int(retry) * 0x85EBCA77
+    x ^= (x >> 16) & 0xFFFFFFFF
+    return int(x & 0x7FFFFFFF)
 
 
 def _parse_json_object(text: str) -> dict | None:
@@ -240,6 +310,10 @@ class Interviewer:
         if self._total <= 0:
             self._total = len(self._fallback) or 8
 
+        warmup_cfg = int(getattr(self._cfg, "warmup_count", 0) or 0)
+        self._warmup_count = max(0, min(warmup_cfg, self._total))
+        self._session_key = 0
+
         self._generated: dict[int, InterviewQuestion] = {}
         self._pending_index: int | None = None
         self._lock = threading.Lock()
@@ -247,6 +321,8 @@ class Interviewer:
         self._client: OllamaInterviewQuestionClient | None = None
         if self._cfg.use_llm_questions and self._ollama.enabled:
             self._client = OllamaInterviewQuestionClient(self._ollama)
+        if self._client is None:
+            self._warmup_count = 0
 
     def stop(self) -> None:
         if self._client is not None:
@@ -264,22 +340,32 @@ class Interviewer:
         resp = self._client.pop_latest()
         if resp is None:
             return None
+        if int(resp.session_key) != int(self._session_key):
+            return None
         if resp.text:
-            q = InterviewQuestion(id=f"llm_{resp.index + 1}", text=resp.text, ready=True, source="llm")
+            llm_n = int(resp.index) - int(self._warmup_count) + 1
+            qid = f"llm_{llm_n}" if llm_n >= 1 else f"llm_{resp.index + 1}"
+            q = InterviewQuestion(id=qid, text=resp.text, ready=True, source="llm")
             with self._lock:
                 self._generated[int(resp.index)] = q
                 if self._pending_index == int(resp.index):
                     self._pending_index = None
             return q if resp.index == self._idx else None
 
-        fb = self._fallback[int(resp.index)] if 0 <= int(resp.index) < len(self._fallback) else None
-        if fb is None:
-            return None
+        # Only fall back immediately if this is the active (currently displayed) question.
+        # If a prefetch failed, leave it ungenerated so we can retry later instead of
+        # permanently locking the session into the same fallback question set.
         with self._lock:
-            self._generated[int(resp.index)] = fb
             if self._pending_index == int(resp.index):
                 self._pending_index = None
-        return fb if resp.index == self._idx else None
+        if resp.index != self._idx:
+            return None
+
+        fb = self._fallback_question(int(resp.index))
+        q_fb = InterviewQuestion(id=fb.id, text=fb.text, ready=True, source="fallback")
+        with self._lock:
+            self._generated[int(resp.index)] = q_fb
+        return q_fb
 
     @property
     def started(self) -> bool:
@@ -299,10 +385,17 @@ class Interviewer:
 
     def start(self) -> InterviewQuestion:
         with self._lock:
+            self._session_key = random.randint(1, 2_147_483_647)
             self._idx = 0
             self._pending_index = None
             self._generated = {}
-        return self.current()
+            for i in range(self._warmup_count):
+                fb = self._fallback_question(i)
+                self._generated[int(i)] = InterviewQuestion(id=fb.id, text=fb.text, ready=True, source="warmup")
+        q = self.current()
+        if q.ready:
+            self.prefetch()
+        return q
 
     def current(self) -> InterviewQuestion:
         if self._idx < 0:
@@ -310,9 +403,8 @@ class Interviewer:
         if self._idx >= self._total:
             return InterviewQuestion("done", "Interview complete. Thank you.")
         if self._client is None:
-            if 0 <= self._idx < len(self._fallback):
-                return self._fallback[self._idx]
-            return InterviewQuestion("q", "Tell me about a time you solved a challenging problem.", ready=True, source="predefined")
+            fb = self._fallback_question(self._idx)
+            return InterviewQuestion(id=fb.id, text=fb.text, ready=True, source="predefined")
 
         with self._lock:
             existing = self._generated.get(self._idx)
@@ -322,9 +414,19 @@ class Interviewer:
         if existing is not None:
             return existing
 
+        if self._idx < self._warmup_count:
+            fb = self._fallback_question(self._idx)
+            q = InterviewQuestion(id=fb.id, text=fb.text, ready=True, source="warmup")
+            with self._lock:
+                self._generated[int(self._idx)] = q
+                if self._pending_index == int(self._idx):
+                    self._pending_index = None
+            return q
+
         if pending != self._idx:
             self._client.submit(
                 _QuestionRequest(
+                    session_key=int(self._session_key),
                     index=int(self._idx),
                     total=int(self._total),
                     history=history,
@@ -341,4 +443,49 @@ class Interviewer:
             return self.start()
         with self._lock:
             self._idx += 1
-        return self.current()
+        q = self.current()
+        if q.ready:
+            self.prefetch()
+        return q
+
+    def prefetch(self) -> None:
+        if self._client is None:
+            return
+        if self._idx < 0:
+            return
+        target = int(self._warmup_count) if self._idx < self._warmup_count else int(self._idx + 1)
+        if target < 0 or target >= self._total:
+            return
+        with self._lock:
+            if target in self._generated:
+                return
+            if self._pending_index == target:
+                return
+            history = tuple(self._generated[i].text for i in sorted(self._generated) if i < target and self._generated[i].ready)
+        if target < self._warmup_count:
+            fb = self._fallback_question(target)
+            q = InterviewQuestion(id=fb.id, text=fb.text, ready=True, source="warmup")
+            with self._lock:
+                self._generated[int(target)] = q
+            return
+        self._client.submit(
+            _QuestionRequest(
+                session_key=int(self._session_key),
+                index=int(target),
+                total=int(self._total),
+                history=history,
+                target_role=str(self._cfg.target_role or ""),
+            )
+        )
+        with self._lock:
+            self._pending_index = int(target)
+
+    def _fallback_question(self, idx: int) -> InterviewQuestion:
+        if 0 <= idx < len(self._fallback):
+            return self._fallback[idx]
+        return InterviewQuestion(
+            id=f"q_{idx + 1}",
+            text="Tell me about a time you solved a challenging problem.",
+            ready=True,
+            source="predefined",
+        )

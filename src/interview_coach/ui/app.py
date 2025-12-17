@@ -213,7 +213,6 @@ class MainWindow(QMainWindow):
         self._session_active = True
         self._session_started_wall_s = time.time()
         self._btn_start.setEnabled(False)
-        self._btn_next.setEnabled(False)
         self._btn_end.setEnabled(True)
 
     def _on_next(self) -> None:
@@ -320,6 +319,10 @@ class MainWindow(QMainWindow):
         suffix = ""
         if src == "llm":
             suffix = "  (LLM)"
+        elif src == "warmup":
+            suffix = "  (warm-up)"
+        elif src == "fallback":
+            suffix = "  (fallback)"
         elif src == "predefined" and bool(getattr(self._cfg.interview, "use_llm_questions", False)):
             suffix = "  (fallback)"
         self._question.setText(f"Q{idx + 1}/{self._interviewer.total}: {q.text}{suffix}")
@@ -334,6 +337,7 @@ class MainWindow(QMainWindow):
             self._active_question_index = idx
             self._session.add_question_event(q.id, idx, q.text, transcript_text)
             self._speak_question(q.text)
+            self._interviewer.prefetch()
 
     def _speak_question(self, text: str) -> None:
         dur_s = self._tts.speak(text)
